@@ -1,0 +1,13 @@
+{
+  "name": "facebook-voc-collector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ASIN-driven public Facebook VOC collector and Codex Skill",
+  "license": "MIT",
+  "engines": {"node": ">=20"},
+  "scripts": {
+    "test": "node --test tests/test_facebook_core.cjs tests/test_popup.cjs",
+    "check": "node --check scripts/facebook_playwright_collector.cjs && node --check scripts/facebook_voc_core.cjs && node --check scripts/facebook_visible_capture.js && node --check extension/capture.js && node --check extension/popup.js"
+  },
+  "dependencies": {"playwright": ">=1.55.0 <2"}
+}

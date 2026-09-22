@@ -1,0 +1,4 @@
+interface:
+  display_name: "Facebook VOC Collector"
+  short_description: "按 ASIN 自动发现并采集 Facebook 评论与回复"
+  default_prompt: "Use $facebook-voc-collector to automatically discover relevant Facebook posts for an ASIN, collect comments and replies through the dedicated CDP profile, resume from checkpoints, and audit the exports."

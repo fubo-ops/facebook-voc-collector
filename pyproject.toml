@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "facebook-voc-collector"
+version = "1.0.0"
+description = "ASIN-driven public Facebook VOC collector and Codex Skill"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = {file = "LICENSE"}
+dependencies = ["openpyxl>=3.1,<4"]
+
+[tool.setuptools]
+packages = ["scripts"]
