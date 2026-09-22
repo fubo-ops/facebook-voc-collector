@@ -210,9 +210,10 @@ def serve(out_dir, asin, query, port):
             self.end_headers()
             self.wfile.write(body)
 
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print("PAIR_TOKEN=" + token, flush=True)
     print("BRIDGE=http://127.0.0.1:%d/capture" % port, flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    server.serve_forever()
 
 
 def main():
