@@ -13,9 +13,13 @@ const STOP_WORDS = new Set((
   "a an and are as at be been but by can could did do does for from had has have how i if in into is it its " +
   "me more my no not of on or our so than that the their them then there these they this to too us was we were " +
   "what when where which who why will with would you your facebook amazon product products review reviews video " +
+  "like reply share follow see translation write comment comments most relevant all active status indicator " +
   "一个 这个 那个 以及 可以 使用 商品 产品 评论 视频 真的 非常 就是 还是 没有 " +
-  "所有心情 回复 分享 查看 展开 登录 搜索结果 筛选条件 排序方式 发布日期 热门"
+  "所有心情 回复 分享 查看 展开 登录 搜索结果 筛选条件 排序方式 发布日期 热门 查看翻译 写评论 在线状态指示标"
 ).split(/\s+/));
+
+const RELATIVE_TIME_ONLY = /^(?:\d+\s*(?:周|天|小时|分钟|月|年)|刚刚|昨天|\d+\s*(?:w|wk|wks|week|weeks|d|day|days|h|hr|hrs|hour|hours|min|mins|minute|minutes))$/i;
+const UI_ARTIFACT_ONLY = /^(?:查看翻译|写评论(?:…|\.\.\.)?|写回复(?:…|\.\.\.)?|作者留下了心情|在线状态指示标|赞|点赞|回复|分享|关注|最相关|所有评论|see translation|write a comment(?:…|\.\.\.)?|write a reply(?:…|\.\.\.)?|author (?:left a reaction|reacted)|active status indicator|like|reply|share|follow|most relevant|all comments)$/i;
 
 function now() { return new Date().toISOString(); }
 function list(value) { return Array.isArray(value) ? value : value == null ? [] : [value]; }
@@ -40,11 +44,11 @@ function writeJsonl(file, rows) {
 
 function parseArgs(argv) {
   const defaults = {
-    command: "collect", targetComments: "300", targetPosts: "30", maxCommentsPerPost: "100",
+    command: "collect", targetComments: "300", targetPosts: "30", maxCommentsPerPost: "0",
     maxDiscoveryRounds: "5", minNewCommentsPerRound: "3", duplicateRateStop: "0.85",
     maxPostsPerQuery: "10", maxExpandActions: "100", actionDelayMs: "1200", commentLoadWaitMs: "4000",
     postTimeoutSeconds: "180", sessionMode: "cdp", cdpUrl: "http://127.0.0.1:9222",
-    headless: "0", outDir: "outputs/facebook-comments"
+    headless: "0", outDir: "", qualificationMode: "strict", discoveryScrolls: "3"
   };
   const out = {...defaults};
   let index = 0;
@@ -116,24 +120,66 @@ function tokenize(text) {
     ?.filter(token => !STOP_WORDS.has(token) && !/^\d+$/.test(token)) || [];
 }
 
+function classifyCommentText(value) {
+  const rawBody = String(value ?? "").replace(/\r\n?/g, "\n").trim();
+  const lines = rawBody.split(/\n+/).map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const kept = [], removed = [];
+  for (const line of lines) {
+    if (RELATIVE_TIME_ONLY.test(line)) { removed.push({line, reason: "relative_time"}); continue; }
+    if (UI_ARTIFACT_ONLY.test(line)) { removed.push({line, reason: "ui_label"}); continue; }
+    kept.push(line);
+  }
+  const bodyClean = kept.join(" ").replace(/\s+/g, " ").trim();
+  const uiArtifact = Boolean(rawBody) && !bodyClean && removed.length > 0;
+  return {
+    raw_body: rawBody,
+    body_clean: bodyClean,
+    ui_artifact: uiArtifact,
+    ui_artifact_reason: uiArtifact ? clean(removed.map(item => item.reason)).join("|") : "",
+    record_kind: uiArtifact ? "ui_artifact" : "comment"
+  };
+}
+
+function featurePhrases(values) {
+  return clean(list(values).flatMap(value => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    if (!text) return [];
+    const lead = text.match(/^([^:;.!?]{3,48})\s*[:–—-]/)?.[1];
+    const observed = [];
+    for (const pattern of [
+      /\b(?:dog\s+)?lick(?:ing)?\s+bowl\b/ig, /\bslow\s+feeder(?:\s+bowl)?\b/ig,
+      /\b(?:dog|cat|pet)\s+bowl\b/ig, /\benrichment(?:\s+feeding)?\b/ig,
+      /\bmental stimulation\b/ig, /\bnon[- ]slip(?:\s+base)?\b/ig
+    ]) observed.push(...(text.match(pattern) || []));
+    return [lead, ...observed];
+  }));
+}
+
 function inferProduct(product) {
   const title = String(product.title || "");
   const brand = product.brand || tokenize(title)[0] || "";
   const bullets = clean(product.features || product.core_attributes || []);
   const materialPatterns = /(?:stainless steel|silicone|plastic|leather|cotton|wood|aluminum|glass|ceramic|nylon|rubber|foam|metal|fabric|titanium|bamboo|polyester)/ig;
   const materials = clean([...(title.match(materialPatterns) || []), ...bullets.flatMap(value => value.match(materialPatterns) || [])]);
-  const scenarios = clean(bullets.filter(value => /(?:for|during|home|travel|outdoor|indoor|daily|night|car|office|kitchen|bath|dog|cat)/i.test(value)).slice(0, 8));
-  const functions = clean(bullets.slice(0, 10));
+  const scenarios = clean([...(product.usage_contexts || []), ...bullets.filter(value => /(?:for|during|home|travel|outdoor|indoor|daily|night|car|office|kitchen|bath|dog|cat)/i.test(value))]).slice(0, 8);
+  const functions = clean([...(product.functions || []), ...featurePhrases(bullets), ...bullets.slice(0, 10)]);
   const base = clean([product.brand, title, product.category, ...materials, ...functions]).join(" ");
   const words = tokenize(base);
   const compactEntity = clean([brand, ...words.filter(word => /[a-z]/i.test(word)).slice(1, 5)]).join(" ");
   const entities = clean([brand, compactEntity, title]).filter(Boolean);
   const problems = clean([
-    ...bullets.filter(value => /(?:help|reduce|relief|prevent|protect|support|problem|pain|difficult|without)/i.test(value)).slice(0, 6),
+    ...(product.user_problems || []),
+    ...bullets.filter(value => /(?:help|reduce|relief|prevent|protect|support|problem|pain|difficult|without|slow|anxiety|boredom|stress)/i.test(value)).slice(0, 6),
     product.category && `${product.category} problem`, product.category && `${product.category} not working`
   ]);
-  return {...product, brand, materials, usage_contexts: scenarios, functions, user_problems: problems,
-    product_entities: entities, competitors: clean(product.competitors || [])};
+  const productTypes = clean([product.product_type, ...featurePhrases([title, ...bullets]), product.category]);
+  const targetAudiences = clean([...(product.target_audiences || []), ...String([title, ...bullets].join(" ")).match(/\b(?:dogs?|pupp(?:y|ies)|cats?|kittens?|pets?|senior dogs?)\b/ig) || []]);
+  const purchaseIntents = clean(product.purchase_intents || ["review", "worth it", "recommendation"]);
+  const alternatives = clean(product.alternatives || []);
+  return {...product, brand, product_type: productTypes[0] || product.category || title, product_types: productTypes,
+    materials, usage_contexts: scenarios, functions, user_problems: problems, target_audiences: targetAudiences,
+    purchase_intents: purchaseIntents, alternatives, product_entities: entities,
+    competitors: clean(product.competitors || [])};
 }
 
 function buildConversationMap(products, sellerSprite = {}) {
@@ -147,6 +193,10 @@ function buildConversationMap(products, sellerSprite = {}) {
       materials: clean(normalized.flatMap(item => item.materials)),
       usage_contexts: clean(normalized.flatMap(item => item.usage_contexts)),
       user_problems: clean(normalized.flatMap(item => item.user_problems)),
+      product_types: clean(normalized.flatMap(item => item.product_types)),
+      target_audiences: clean(normalized.flatMap(item => item.target_audiences)),
+      purchase_intents: clean(normalized.flatMap(item => item.purchase_intents)),
+      alternatives: clean(normalized.flatMap(item => item.alternatives)),
       competitors: clean(normalized.flatMap(item => item.competitors)),
       community_language: []
     },
@@ -157,18 +207,21 @@ function buildConversationMap(products, sellerSprite = {}) {
 function roundOneQueries(conversationMap) {
   const layers = conversationMap.layers;
   const entity = layers.product_entities.find(value => value.split(/\s+/).length >= 2 && value.length < 80) || layers.product_entities[0] || conversationMap.asins[0];
-  const category = layers.category_and_functions[0] || entity;
+  const productType = layers.product_types?.[0] || layers.category_and_functions[0] || entity;
+  const category = layers.category_and_functions.find(value => value !== productType) || productType;
   const problem = [...layers.user_problems].sort((a, b) => a.length - b.length)[0] || `${category} problem`;
   const context = [...layers.usage_contexts].sort((a, b) => a.length - b.length)[0] || `${category} use`;
-  const competitor = layers.competitors[0];
+  const competitor = layers.competitors[0] || layers.alternatives?.[0];
+  const target = layers.target_audiences?.[0] || "users";
+  const intent = layers.purchase_intents?.[0] || "review";
   const values = {
     product_entity: entity,
-    category_solution: `${category} solution`,
+    category_solution: `${productType} ${category}`,
     problem_symptom: problem,
     usage_context: context,
-    decision_intent: `${entity} review worth it`,
-    competitor: competitor ? `${entity} vs ${competitor}` : `${entity} alternatives`,
-    natural_language_question: `does ${entity} work for ${problem}`
+    decision_intent: `${productType} ${intent} worth it`,
+    competitor: competitor ? `${productType} vs ${competitor}` : `${productType} alternatives`,
+    natural_language_question: `best ${productType} for ${target} ${problem}`
   };
   return QUERY_FAMILIES.map(family => ({query_id: `r1-${family}`, family, query: values[family],
     discovery_round: 1, generation_source: "amazon_product_evidence", source_terms: clean(tokenize(values[family])),
@@ -178,8 +231,12 @@ function roundOneQueries(conversationMap) {
 function communityTerms(posts, comments, limit = 12) {
   const evidence = new Map();
   for (const source of [...posts, ...comments]) {
+    if (source.ui_artifact || source.record_kind === "ui_artifact") continue;
     const id = source.comment_id || `post:${source.post_id}`;
-    for (const token of tokenize(source.body || source.post_text || source.post_title || "")) {
+    const rawText = source.body_clean ?? source.body ?? source.post_text ?? source.post_title ?? "";
+    const classified = classifyCommentText(rawText);
+    if (classified.ui_artifact) continue;
+    for (const token of tokenize(classified.body_clean)) {
       if (!evidence.has(token)) evidence.set(token, new Set());
       evidence.get(token).add(id);
     }
@@ -190,33 +247,35 @@ function communityTerms(posts, comments, limit = 12) {
 
 function laterRoundQueries(round, conversationMap, posts, comments, existing = []) {
   if (round < 2) throw new Error("Later-round queries require discovery_round >= 2");
-  const terms = communityTerms(posts, comments);
+  const vocabulary = new Set(tokenize([
+    ...conversationMap.layers.product_entities,
+    ...conversationMap.layers.category_and_functions,
+    ...conversationMap.layers.user_problems,
+    ...conversationMap.layers.usage_contexts,
+    ...conversationMap.layers.materials
+  ].join(" ")));
+  const terms = communityTerms(posts, comments, 100).filter(item => vocabulary.has(item.term)).slice(0, 12);
   const used = new Set(existing.map(item => String(item.query || "").toLowerCase()));
-  const entity = conversationMap.layers.product_entities[0] || conversationMap.asins[0];
-  const pattern = {
-    product_entity: term => `${entity} ${term}`,
-    category_solution: term => `${term} solution recommendations`,
-    problem_symptom: term => `${term} problem help`,
-    usage_context: term => `${term} daily use`,
-    decision_intent: term => `${term} worth it review`,
-    competitor: term => `${entity} vs ${term}`,
-    natural_language_question: term => `what do people use for ${term}`
-  };
+  if (terms.length < 2) return [];
   const out = [];
   QUERY_FAMILIES.forEach((family, index) => {
-    const source = terms[index % Math.max(terms.length, 1)];
-    if (!source) return;
-    const query = pattern[family](source.term);
+    const first = terms[index % Math.max(terms.length, 1)];
+    const second = terms[(index + 1) % Math.max(terms.length, 1)];
+    if (!first) return;
+    const sources = [first, second].filter((item, itemIndex, items) => item && items.findIndex(other => other.term === item.term) === itemIndex);
+    const query = sources.map(item => item.term).join(" ");
     if (used.has(query.toLowerCase())) return;
     out.push({query_id: `r${round}-${family}`, family, query, discovery_round: round,
-      generation_source: "observed_facebook_community_language", source_terms: [source.term],
-      evidence_comment_ids: source.evidence_ids.filter(id => !String(id).startsWith("post:")), status: "pending"});
+      generation_source: "observed_facebook_community_language", source_terms: sources.map(item => item.term),
+      evidence_comment_ids: clean(sources.flatMap(item => item.evidence_ids)).filter(id => !String(id).startsWith("post:")), status: "pending"});
   });
   return out;
 }
 
 function semanticScore(text, conversationMap) {
-  const haystack = new Set(tokenize(text));
+  const classified = classifyCommentText(text);
+  if (classified.ui_artifact) return {score: 0, hits: {entity: [], category: [], problem: [], context: [], competitor: []}, matched_groups: []};
+  const haystack = new Set(tokenize(classified.body_clean));
   const groups = {
     entity: tokenize(conversationMap.layers.product_entities.join(" ")),
     category: tokenize(conversationMap.layers.category_and_functions.join(" ")),
@@ -239,16 +298,45 @@ function semanticTier(text, conversationMap) {
   return {...result, tier};
 }
 
-function postQualified(score) {
-  return score.matched_groups.length >= 2 || score.hits.entity.length >= 2 || score.score >= 0.5;
+function postQualified(score, mode = "strict", text = "", conversationMap = null) {
+  const distinctHits = new Set(Object.values(score.hits).flat());
+  const strict = score.hits.entity.length >= 2 || (distinctHits.size >= 2 && (score.matched_groups.length >= 2 || score.score >= 0.5));
+  if (strict || mode !== "expanded" || !conversationMap) return strict;
+  const haystack = ` ${String(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim()} `;
+  return clean(conversationMap.layers?.product_entities || []).some(entity => {
+    const terms = tokenize(entity);
+    if (terms.length >= 2) return haystack.includes(` ${terms.join(" ")} `);
+    return terms.length === 1 && terms[0].length >= 5 && haystack.includes(` ${terms[0]} `);
+  });
+}
+
+function matchesRequiredTermGroups(text, specification = "") {
+  if (!String(specification || "").trim()) return true;
+  const haystack = new Set(tokenize(text));
+  return String(specification).split(";").map(group => clean(group.split("|").map(term => term.toLowerCase())))
+    .filter(group => group.length).every(group => group.some(term => haystack.has(term)));
 }
 
 function mergeComments(rows) {
   const output = [], index = new Map();
-  let duplicateCount = 0;
+  let duplicateCount = 0, artifactDuplicateCount = 0;
   for (const input of rows) {
     const row = {...input};
+    const classified = classifyCommentText(row.raw_body ?? row.body_clean ?? row.body ?? "");
+    row.raw_body = row.raw_body ?? classified.raw_body;
+    row.body_clean = row.body_clean ?? classified.body_clean;
+    row.ui_artifact = Boolean(row.ui_artifact || classified.ui_artifact);
+    row.ui_artifact_reason = row.ui_artifact_reason || classified.ui_artifact_reason;
+    row.record_kind = row.ui_artifact ? "ui_artifact" : (row.record_kind || "comment");
+    row.body = row.body_clean;
     row.comment_id = String(row.comment_id || "").trim();
+    if (row.ui_artifact) {
+      const key = `artifact:${row.post_id}|${row.source_dom_key || row.raw_body}`;
+      if (index.has(key)) { artifactDuplicateCount++; continue; }
+      row.dedup_uncertain = false;
+      row.record_id = row.record_id || `artifact:${hash(key).slice(0, 24)}`;
+      index.set(key, row); output.push(row); continue;
+    }
     row.dedup_uncertain = !row.comment_id;
     if (!row.comment_id) {
       row.record_id = row.record_id || `uncertain:${hash(`${row.post_id}|${row.author}|${row.body}|${row.collected_at}`).slice(0, 24)}`;
@@ -263,7 +351,7 @@ function mergeComments(rows) {
     prior.matched_queries = clean([...list(prior.matched_queries), ...list(row.matched_queries)]);
     if (prior.post_audit_status !== "PASS" && row.post_audit_status === "PASS") Object.assign(prior, row, {matched_asins: prior.matched_asins, matched_queries: prior.matched_queries});
   }
-  return {rows: output, technical_duplicate_count: duplicateCount};
+  return {rows: output, technical_duplicate_count: duplicateCount, artifact_duplicate_count: artifactDuplicateCount};
 }
 
 function replacePostRows(rows, replacement, postId) {
@@ -291,6 +379,7 @@ function auditPost(input) {
   const issues = clean(input.issues || []);
   if (input.blocked_reason) return {status: "BLOCKED", issues: clean([...issues, input.blocked_reason])};
   if (input.orphan_reply_ids?.length) issues.push("orphan_replies");
+  if (input.incomplete_reply_lineage_ids?.length) issues.push("incomplete_reply_lineage");
   if (input.remaining_controls > 0) issues.push("unexpanded_controls");
   if (input.displayed_count == null || (Number(input.displayed_count) === 0 && !input.zero_comment_evidence)) issues.push("unknown_total");
   if (input.timed_out) issues.push("timeout");
@@ -307,11 +396,29 @@ function stoppingDecision(history, counts, options) {
   if (completed.length >= Number(options.maxDiscoveryRounds || 5)) return {stop: true, reason: "max_discovery_rounds_reached"};
   if (completed.length >= 2 && completed.slice(-2).every(row => Number(row.new_comments || 0) < Number(options.minNewCommentsPerRound || 3)))
     return {stop: true, reason: "two_low_yield_rounds"};
+  if (completed.length >= 2 && completed.slice(-2).every(row => Number(row.high_relevance_candidates ?? row.selected_posts ?? 0) === 0))
+    return {stop: true, reason: "two_no_high_relevance_rounds"};
   if (completed.length >= 2 && completed.slice(-2).every(row => Number(row.duplicate_rate || 0) >= Number(options.duplicateRateStop || 0.85)))
     return {stop: true, reason: "two_high_duplicate_rounds"};
   if (completed.length >= 2 && completed.slice(-2).every(row => row.semantic_coverage_hash && row.semantic_coverage_hash === completed.at(-1).semantic_coverage_hash))
     return {stop: true, reason: "semantic_coverage_saturated"};
   return {stop: false, reason: null};
+}
+
+function commentBudgetReached(count, maxCommentsPerPost) {
+  const limit = Number(maxCommentsPerPost ?? 0);
+  return Number.isFinite(limit) && limit > 0 && Number(count || 0) >= limit;
+}
+
+function applyCommentBudget(rows, maxCommentsPerPost) {
+  const limit = Number(maxCommentsPerPost ?? 0);
+  if (!Number.isFinite(limit) || limit <= 0) return rows;
+  let realComments = 0;
+  return rows.filter(row => row.ui_artifact || realComments++ < limit);
+}
+
+function frontierClosed(remainingControls, stableRounds) {
+  return Number(remainingControls || 0) === 0 && Number(stableRounds || 0) >= 2;
 }
 
 function csv(rows) {
@@ -322,7 +429,7 @@ function csv(rows) {
 
 module.exports = {
   QUERY_FAMILIES, now, clean, hash, writeJson, writeJsonl, parseArgs, readAsins, normalizePostUrl,
-  classifyAccess, tokenize, inferProduct, buildConversationMap, roundOneQueries, communityTerms,
-  laterRoundQueries, semanticScore, semanticTier, postQualified, mergeComments, replacePostRows, deriveDepths,
-  auditPost, stoppingDecision, csv
+  classifyAccess, tokenize, classifyCommentText, inferProduct, buildConversationMap, roundOneQueries, communityTerms,
+  laterRoundQueries, semanticScore, semanticTier, postQualified, matchesRequiredTermGroups, mergeComments, replacePostRows, deriveDepths,
+  auditPost, stoppingDecision, commentBudgetReached, applyCommentBudget, frontierClosed, csv
 };

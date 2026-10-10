@@ -18,6 +18,22 @@ function extractVisible() {
       return (decoded.match(/comment:\d+_(\d+)/) || [])[1] || '';
     } catch { return ''; }
   };
+  const classifyBody = value => {
+    const raw_body = String(value || '').replace(/\r\n?/g, '\n').trim();
+    const relativeTime = /^(?:\d+\s*(?:周|天|小时|分钟|月|年)|刚刚|昨天|\d+\s*(?:w|wk|wks|week|weeks|d|day|days|h|hr|hrs|hour|hours|min|mins|minute|minutes))$/i;
+    const uiLabel = /^(?:查看翻译|写评论(?:…|\.\.\.)?|写回复(?:…|\.\.\.)?|作者留下了心情|在线状态指示标|赞|点赞|回复|分享|关注|最相关|所有评论|see translation|write a comment(?:…|\.\.\.)?|write a reply(?:…|\.\.\.)?|author (?:left a reaction|reacted)|active status indicator|like|reply|share|follow|most relevant|all comments)$/i;
+    const kept = [], reasons = [];
+    for (const line of raw_body.split(/\n+/).map(item => item.replace(/\s+/g, ' ').trim()).filter(Boolean)) {
+      if (relativeTime.test(line)) reasons.push('relative_time');
+      else if (uiLabel.test(line)) reasons.push('ui_label');
+      else kept.push(line);
+    }
+    const body_clean = kept.join(' ').replace(/\s+/g, ' ').trim();
+    const ui_artifact = Boolean(raw_body) && !body_clean && reasons.length > 0;
+    return {raw_body, body_clean, ui_artifact,
+      ui_artifact_reason: ui_artifact ? [...new Set(reasons)].join('|') : '',
+      record_kind: ui_artifact ? 'ui_artifact' : 'comment'};
+  };
   const links = [...document.querySelectorAll('a[href*="comment_id="]')].filter(link => {
     try {
       const linked = new URL(link.href, location.href);
@@ -56,11 +72,13 @@ function extractVisible() {
       .find(node => (node.innerText || '').trim());
     const fallbackAuthorNode = autoNodes[0];
     const author = (authorNode && authorNode.innerText || fallbackAuthorNode && fallbackAuthorNode.innerText || '').replace(/\s+/g, ' ').trim();
-    const texts = autoNodes.filter(node => authorNode ? !authorNode.contains(node) : node !== fallbackAuthorNode)
-      .map(node => (node.innerText || '').replace(/\s+/g, ' ').trim())
-      .filter(text => text && text !== author && !/^(like|reply|share|follow|赞|回复|分享|关注|查看翻译)$/i.test(text));
-    const body = texts.sort((a, b) => b.length - a.length)[0] || '';
-    if (!body) continue;
+    const bodyCandidates = autoNodes.filter(node => authorNode ? !authorNode.contains(node) : node !== fallbackAuthorNode)
+      .map(node => classifyBody(node.innerText || ''))
+      .filter(item => item.raw_body && item.raw_body !== author)
+      .sort((a, b) => b.body_clean.length - a.body_clean.length || b.raw_body.length - a.raw_body.length);
+    const bodyRecord = bodyCandidates[0] || classifyBody('');
+    const body = bodyRecord.body_clean;
+    if (!bodyRecord.raw_body) continue;
     seen.add(key);
     const timeNode = permalink && permalink.link;
     const fallbackTime = (card.innerText || '').split(/\r?\n/).map(text => text.trim())
@@ -71,7 +89,9 @@ function extractVisible() {
     const label = card.getAttribute('aria-label') || '';
     const replyHint = (label.match(/(?:replied to|回复了)\s*([^'的]+)(?:'s comment|的评论)/i) || [])[1] || '';
     entries.push({card, comment_id: commentId, explicit_parent_id: parentId || '', reply_hint: replyHint.trim(),
-      author, body,
+      author, body, raw_body: bodyRecord.raw_body, body_clean: bodyRecord.body_clean,
+      ui_artifact: bodyRecord.ui_artifact, ui_artifact_reason: bodyRecord.ui_artifact_reason,
+      record_kind: bodyRecord.record_kind,
       created_at: timeNode && (timeNode.getAttribute('aria-label') || timeNode.getAttribute('title') || timeNode.innerText) || fallbackTime,
       reaction_count: reaction, comment_url: permalink ? permalink.url.href : '',
       dom_key: card.getAttribute('aria-label') || `${author}|${body}|${fallbackTime}`});
@@ -123,7 +143,10 @@ function extractVisible() {
   const comments = entries.map((entry, index) => ({
     comment_id: entry.comment_id,
     parent_comment_id: entry.explicit_parent_id || (parentEntries[index] ? (parentEntries[index].comment_id || `unresolved:${parentEntries[index].dom_key}`) : ''),
-    depth: entry.explicit_parent_id ? Math.max(1, depthOf(index)) : depthOf(index), author: entry.author, body: entry.body, created_at: entry.created_at,
+    depth: entry.explicit_parent_id ? Math.max(1, depthOf(index)) : depthOf(index), author: entry.author,
+    body: entry.body, raw_body: entry.raw_body, body_clean: entry.body_clean,
+    ui_artifact: entry.ui_artifact, ui_artifact_reason: entry.ui_artifact_reason, record_kind: entry.record_kind,
+    created_at: entry.created_at,
     reaction_count: entry.reaction_count, comment_url: entry.comment_url, dom_key: entry.dom_key
   }));
   const controls = [...document.querySelectorAll('[role="button"], button')]

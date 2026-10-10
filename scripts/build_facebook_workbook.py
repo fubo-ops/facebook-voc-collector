@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 from pathlib import Path
 
 ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+RELATIVE_TIME_ONLY = re.compile(
+    r"^(?:\d+\s*(?:周|天|小时|分钟|月|年)|刚刚|昨天|"
+    r"\d+\s*(?:w|wk|wks|week|weeks|d|day|days|h|hr|hrs|hour|hours|min|mins|minute|minutes))$",
+    re.IGNORECASE,
+)
+UI_ARTIFACT_ONLY = re.compile(
+    r"^(?:查看翻译|写评论(?:…|\.\.\.)?|写回复(?:…|\.\.\.)?|作者留下了心情|在线状态指示标|赞|点赞|回复|分享|关注|最相关|所有评论|"
+    r"see translation|write a comment(?:…|\.\.\.)?|write a reply(?:…|\.\.\.)?|"
+    r"author (?:left a reaction|reacted)|active status indicator|like|reply|share|follow|most relevant|all comments)$",
+    re.IGNORECASE,
+)
 SHEETS = (
     "Raw_Comments", "Trusted_Comments", "Partial_Candidates", "Conversation_Map",
     "Query_Performance", "Post_Audit", "Run_Summary", "Quality_Gate",
@@ -65,17 +77,39 @@ def flatten_conversation_map(value):
     return rows
 
 
-def quality_rows(raw, trusted, partial, page_map, manifest):
+def is_ui_artifact_text(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return bool(text and (RELATIVE_TIME_ONLY.fullmatch(text) or UI_ARTIFACT_ONLY.fullmatch(text)))
+
+
+def quality_rows(raw, trusted, partial, page_map, manifest, out_dir=None):
     stable_ids = [row.get("comment_id") for row in raw if row.get("comment_id")]
-    reply_rows = [row for row in raw if int(row.get("depth") or 0) > 0]
+    reply_rows = [row for row in raw if not row.get("ui_artifact") and int(row.get("depth") or 0) > 0]
     orphan_rows = [row for row in reply_rows if not row.get("parent_comment_id")]
+    csv_count = None
+    if out_dir and (out_dir / "raw_comments.csv").exists():
+        with (out_dir / "raw_comments.csv").open(encoding="utf-8-sig", newline="") as handle:
+            csv_count = sum(1 for _ in csv.DictReader(handle))
+    evidence_ok = True
+    if out_dir:
+        expected_files = ("audit.json", "comment_tree.json", "frontier.json", "action_ledger.json")
+        evidence_ok = all(all((out_dir / "evidence" / str(item.get("post_id")) / name).exists()
+                              for name in expected_files) for item in page_map)
     checks = {
         "raw_manifest_count_matches": len(raw) == manifest.get("final_collected_count"),
+        "raw_csv_count_matches": csv_count is None or csv_count == len(raw),
         "stable_ids_unique": len(stable_ids) == len(set(stable_ids)),
         "trusted_subset_of_raw": all(row.get("record_id") in {item.get("record_id") for item in raw} for row in trusted),
         "partial_subset_of_raw": all(row.get("record_id") in {item.get("record_id") for item in raw} for row in partial),
         "reply_parent_present": not orphan_rows,
         "post_audits_present": len(page_map) >= len({row.get("post_id") for row in raw}),
+        "page_map_manifest_count_matches": len(page_map) == manifest.get("post_count", len(page_map)),
+        "evidence_bundles_complete": evidence_ok,
+        "ui_artifact_manifest_count_matches": sum(bool(row.get("ui_artifact")) for row in raw) == manifest.get("ui_artifact_count", 0),
+        "trusted_manifest_count_matches": len(trusted) == manifest.get("trusted_comment_count", manifest.get("trusted_count")),
+        "reply_manifest_count_matches": len(reply_rows) == manifest.get("reply_count", len(reply_rows)),
+        "trusted_has_no_ui_artifacts": all(not row.get("ui_artifact") and row.get("record_kind") != "ui_artifact" for row in trusted),
+        "trusted_has_no_ui_only_text": all(not is_ui_artifact_text(row.get("body_clean", row.get("body"))) for row in trusted),
     }
     return [{"check": key, "status": "PASS" if value else "FAIL", "value": value} for key, value in checks.items()]
 
@@ -100,8 +134,9 @@ def build(out_dir: Path):
     add_sheet(workbook, "Query_Performance", plan.get("queries", []))
     add_sheet(workbook, "Post_Audit", page_map)
     add_sheet(workbook, "Run_Summary", [{"metric": key, "value": value} for key, value in manifest.items()])
-    add_sheet(workbook, "Quality_Gate", quality_rows(raw, trusted, partial, page_map, manifest))
-    output = out_dir / "facebook_voc.xlsx"
+    add_sheet(workbook, "Quality_Gate", quality_rows(raw, trusted, partial, page_map, manifest, out_dir))
+    asins = manifest.get("asins") or conversation.get("asins") or ["UNKNOWN_ASIN"]
+    output = out_dir / f"{'_'.join(str(value) for value in asins)}_Facebook评论.xlsx"
     workbook.save(output)
     return {"status": "written", "output": str(output.resolve()), "sheets": list(SHEETS),
             "raw": len(raw), "trusted": len(trusted), "partial": len(partial)}

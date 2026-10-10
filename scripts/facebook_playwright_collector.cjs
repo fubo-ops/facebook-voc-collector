@@ -9,7 +9,7 @@ const {spawnSync} = require("child_process");
 const core = require("./facebook_voc_core.cjs");
 const pageCapture = require("./facebook_visible_capture.js");
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 
 function help() {
   console.log(`Facebook VOC automated collector
@@ -19,8 +19,9 @@ Usage:
 
 Inputs:
   --asin ASIN | --asins ASIN1,ASIN2 | --asin-file FILE
-  --target-comments 300 --target-posts 30 --max-comments-per-post 100
-  --max-discovery-rounds 5 --max-posts-per-query 10
+  --target-comments 300 --target-posts 30 --max-comments-per-post 0 (0 = unlimited)
+  --max-discovery-rounds 5 --max-posts-per-query 10 --discovery-scrolls 3
+  --qualification-mode strict|expanded
   --comment-load-wait-ms 4000 --post-timeout-seconds 180
   --resume [CHECKPOINT] --retry-partial --force-reaudit-partial --complete-query-plan
 
@@ -29,8 +30,14 @@ Browser:
   Uses a dedicated visible Chrome profile. Login/CAPTCHA is never automated.
 
 Output:
-  --out-dir outputs/facebook-comments
-  JSONL, CSV, maps, manifest, checkpoint, per-post evidence, and facebook_voc.xlsx`);
+  --out-dir DIR (optional; default: FACEBOOK_COLLECTION_ROOT/ASIN)
+  JSONL, CSV, maps, manifest, checkpoint, per-post evidence, and ASIN_Facebook评论.xlsx`);
+}
+
+function resolveOutputDir(options, asins) {
+  if (options.outDir) return path.resolve(options.outDir);
+  const root = process.env.FACEBOOK_COLLECTION_ROOT || path.resolve("Facebook评论采集");
+  return path.join(root, asins.join("_"));
 }
 
 function playwright() {
@@ -148,9 +155,10 @@ async function productContext(context, asins, owned) {
 async function discoverPosts(page, query, options, conversationMap) {
   const candidates = [];
   let lastReason = null, readySearches = 0;
+  const executedQuery = String(query.query || "").trim();
   const searchUrls = [
-    `https://www.facebook.com/search/posts/?q=${encodeURIComponent(query.query)}`,
-    `https://www.facebook.com/watch/search/?q=${encodeURIComponent(query.query)}`
+    `https://www.facebook.com/search/posts/?q=${encodeURIComponent(executedQuery)}`,
+    `https://www.facebook.com/watch/search/?q=${encodeURIComponent(executedQuery)}`
   ];
   for (const url of searchUrls) {
     const state = await goto(page, url);
@@ -160,7 +168,8 @@ async function discoverPosts(page, query, options, conversationMap) {
       continue;
     }
     readySearches++;
-    for (let index = 0; index < 3; index++) {
+    const discoveryScrolls = Math.max(1, Math.min(20, Number(options.discoveryScrolls || 3)));
+    for (let index = 0; index < discoveryScrolls; index++) {
       await page.evaluate(() => window.scrollBy(0, Math.max(900, innerHeight * 0.9)));
       await page.waitForTimeout(900);
     }
@@ -173,10 +182,10 @@ async function discoverPosts(page, query, options, conversationMap) {
       if (!(/\/(?:posts|permalink|videos|reels?)\//.test(url.pathname) || (url.pathname === "/watch/" && url.searchParams.get("v")) || url.searchParams.get("story_fbid"))) continue;
       let container = anchor.closest("[role='article']") || anchor.parentElement;
       for (let level = 0; container && level < 3; level++, container = container.parentElement) {
-        const text = (container.innerText || "").replace(/\s+/g, " ").trim();
+        const text = (container.innerText || "").replace(/\r\n?/g, "\n").trim();
         if (text.length >= 40) break;
       }
-      output.push({url: url.href, text: (container?.innerText || anchor.innerText || "").replace(/\s+/g, " ").trim().slice(0, 4000)});
+      output.push({url: url.href, text: (container?.innerText || anchor.innerText || "").replace(/\r\n?/g, "\n").trim().slice(0, 4000)});
     }
     return output;
     }));
@@ -189,11 +198,13 @@ async function discoverPosts(page, query, options, conversationMap) {
     seen.add(normalized.post_id);
     const semantic = core.semanticTier(candidate.text, conversationMap);
     posts.push({...normalized, post_text: candidate.text, discovered_by_query_id: query.query_id,
-      discovered_by_query: query.query, discovery_round: query.discovery_round, semantic_tier: semantic.tier,
-      semantic_score: semantic.score, semantic_hits: semantic.hits, qualified: core.postQualified(semantic)});
+      discovered_by_query: executedQuery, discovery_round: query.discovery_round, semantic_tier: semantic.tier,
+      semantic_score: semantic.score, semantic_hits: semantic.hits,
+      qualification_mode: options.qualificationMode || "strict",
+      qualified: core.postQualified(semantic, options.qualificationMode, candidate.text, conversationMap)});
     if (posts.length >= Number(options.maxPostsPerQuery || 10)) break;
   }
-  return {status: "READY", reason: null, posts};
+  return {status: "READY", reason: null, posts, executed_query: executedQuery};
 }
 
 function checkpointPath(options, outDir) {
@@ -286,15 +297,22 @@ async function waitForCaptureStable(page, timeoutMs = 6000) {
 
 function normalizeCaptured(capture, post, checkpoint, conversationMap) {
   return capture.comments.map(comment => {
-    const semantics = core.semanticTier(comment.body, conversationMap);
+    const classified = core.classifyCommentText(comment.raw_body ?? comment.body_clean ?? comment.body ?? "");
+    const rawBody = comment.raw_body ?? classified.raw_body;
+    const bodyClean = comment.body_clean ?? classified.body_clean;
+    const uiArtifact = Boolean(comment.ui_artifact || classified.ui_artifact);
+    const semantics = uiArtifact ? core.semanticTier("", conversationMap) : core.semanticTier(bodyClean, conversationMap);
     return {
-      schema_version: "facebook_comment_v2", platform: "facebook", source_specific_record_type: "comment",
+      schema_version: "facebook_comment_v3", platform: "facebook",
+      source_specific_record_type: uiArtifact ? "ui_artifact" : "comment", record_kind: uiArtifact ? "ui_artifact" : "comment",
       asin: checkpoint.asins[0], matched_asins: checkpoint.asins, matched_queries: [post.discovered_by_query].filter(Boolean),
       post_id: post.post_id, post_url: post.post_url, post_title: capture.post_title || "", post_semantic_tier: post.semantic_tier,
       semantic_tier: semantics.tier, semantic_score: semantics.score, comment_id: comment.comment_id || "",
       reply_comment_id: comment.parent_comment_id ? (comment.comment_id || "") : "",
       parent_comment_id: comment.parent_comment_id || `post:${post.post_id}`, depth: Number(comment.depth) || 0,
-      author: comment.author || "", body: comment.body || "", created_at: comment.created_at || "",
+      author: comment.author || "", body: bodyClean, raw_body: rawBody, body_clean: bodyClean,
+      ui_artifact: uiArtifact, ui_artifact_reason: comment.ui_artifact_reason || classified.ui_artifact_reason,
+      created_at: comment.created_at || "",
       reaction_count: comment.reaction_count || "", comment_url: comment.comment_url || "", collected_at: core.now(),
       source_dom_key: comment.dom_key || "",
       post_audit_status: null, evidence_path: path.relative(process.cwd(), evidenceDir(path.resolve(checkpoint.out_dir), post.post_id)).replace(/\\/g, "/")
@@ -305,7 +323,9 @@ function normalizeCaptured(capture, post, checkpoint, conversationMap) {
 async function collectPost(context, post, options, checkpoint, checkpointFile, conversationMap, outDir, owned) {
   const page = await context.newPage(); owned.add(page); checkpoint.owned_page_urls.push(post.post_url);
   const evidence = evidenceDir(outDir, post.post_id); fs.mkdirSync(evidence, {recursive: true});
-  const actionLedger = [], localEvents = [], observed = new Map(), started = Date.now();
+  const actionLedger = [], localEvents = [], observed = new Map(), stableIds = new Set(), started = Date.now();
+  const commentBudget = Number(options.maxCommentsPerPost ?? 0);
+  const hasCommentBudget = Number.isFinite(commentBudget) && commentBudget > 0;
   let latest = null, prefetched = null, stableRounds = 0, timedOut = false, blockedReason = null, actionCount = 0;
   try {
     const navigationUrl = /\/reels?\//i.test(post.post_url) ? `https://www.facebook.com/watch/?v=${post.post_id}` : post.post_url;
@@ -335,21 +355,23 @@ async function collectPost(context, post, options, checkpoint, checkpointFile, c
       }
       latest = capture;
       const rows = normalizeCaptured(capture, post, checkpoint, conversationMap);
-      const before = new Set(observed.keys());
+      const beforeStableIds = new Set(stableIds);
       localEvents.push(...rows);
       rows.forEach((row, index) => {
-        const key = row.comment_id ? `id:${row.comment_id}` : `dom:${row.source_dom_key || index}`;
+        const key = row.comment_id ? `id:${row.comment_id}` : row.ui_artifact
+          ? `artifact:${row.source_dom_key || row.raw_body || index}` : `dom:${row.source_dom_key || index}`;
         if (!observed.has(key)) observed.set(key, row);
+        if (row.comment_id && !row.ui_artifact) stableIds.add(row.comment_id);
       });
-      const after = new Set(observed.keys());
-      const newKeys = [...after].filter(key => !before.has(key));
-      stableRounds = newKeys.length ? 0 : stableRounds + 1;
+      const newStableIds = [...stableIds].filter(key => !beforeStableIds.has(key));
+      stableRounds = newStableIds.length ? 0 : stableRounds + 1;
       Object.assign(post, {last_visible_count: observed.size, last_remaining_controls: capture.remaining_controls, last_capture_at: core.now()});
       checkpoint.raw_capture_events.push(...rows);
       checkpoint.collected_comment_ids = core.clean([...checkpoint.collected_comment_ids, ...rows.map(row => row.comment_id).filter(Boolean)]);
       saveCheckpoint(checkpointFile, checkpoint);
-      if (observed.size >= Number(options.maxCommentsPerPost || 100) && capture.remaining_controls) break;
-      if (!capture.remaining_controls && stableRounds >= 2) break;
+      const observedRealCount = [...observed.values()].filter(row => !row.ui_artifact).length;
+      if (core.commentBudgetReached(observedRealCount, commentBudget) && capture.remaining_controls) break;
+      if (core.frontierClosed(capture.remaining_controls, stableRounds)) break;
       if (actionCount >= Number(options.maxExpandActions || 100)) break;
       if (capture.remaining_controls) {
         const actions = await page.evaluate(pageCapture.expandVisible, 1);
@@ -367,14 +389,19 @@ async function collectPost(context, post, options, checkpoint, checkpointFile, c
   }
   const eventMerge = core.mergeComments(localEvents);
   const observedMerge = core.mergeComments([...observed.values()]);
-  const commentBudget = Number(options.maxCommentsPerPost || 100);
-  const rows = observedMerge.rows.slice(0, commentBudget);
-  if (!blockedReason && Number(latest?.displayed_count || 0) > 0 && !rows.length) blockedReason = "comment_tree_unavailable";
-  const orphanReplyIds = core.deriveDepths(rows, post.post_id);
+  const rows = core.applyCommentBudget(observedMerge.rows, commentBudget);
+  const realRows = rows.filter(row => !row.ui_artifact);
+  if (!blockedReason && Number(latest?.displayed_count || 0) > 0 && !realRows.length) blockedReason = "comment_tree_unavailable";
+  const orphanReplyIds = core.deriveDepths(realRows, post.post_id);
+  const incompleteReplyLineageIds = realRows.filter(row => Number(row.depth || 0) > 0 &&
+    (!row.comment_id || !row.parent_comment_id || row.parent_comment_id === `post:${post.post_id}`))
+    .map(row => row.comment_id || row.record_id || row.source_dom_key);
   const issues = [];
-  if (observedMerge.rows.length > rows.length || (rows.length >= commentBudget && ((latest?.remaining_controls || 0) > 0 || Number(latest?.displayed_count || 0) > rows.length))) issues.push("per_post_comment_budget_reached");
+  if (hasCommentBudget && (observedMerge.rows.filter(row => !row.ui_artifact).length > realRows.length ||
+      (realRows.length >= commentBudget && ((latest?.remaining_controls || 0) > 0 || Number(latest?.displayed_count || 0) > realRows.length)))) issues.push("per_post_comment_budget_reached");
   if (actionCount >= Number(options.maxExpandActions || 100)) issues.push("expand_action_budget_reached");
   const audit = core.auditPost({blocked_reason: blockedReason, orphan_reply_ids: orphanReplyIds,
+    incomplete_reply_lineage_ids: incompleteReplyLineageIds,
     remaining_controls: latest?.remaining_controls ?? 0, displayed_count: latest?.displayed_count ?? null,
     zero_comment_evidence: Boolean(latest?.zero_comment_evidence), stable_rounds: stableRounds, timed_out: timedOut, issues});
   rows.forEach(row => row.post_audit_status = audit.status);
@@ -383,11 +410,14 @@ async function collectPost(context, post, options, checkpoint, checkpointFile, c
     zero_comment_evidence: Boolean(latest?.zero_comment_evidence), action_count: actionCount,
     timed_out: timedOut, closed: audit.status === "PASS", issues: audit.issues};
   const commentTree = {post_id: post.post_id, nodes: rows.map(row => ({comment_id: row.comment_id,
-    parent_comment_id: row.parent_comment_id, depth: row.depth, dedup_uncertain: row.dedup_uncertain}))};
+    parent_comment_id: row.parent_comment_id, depth: row.depth, dedup_uncertain: row.dedup_uncertain,
+    record_kind: row.record_kind, ui_artifact: row.ui_artifact}))};
   const auditRecord = {...audit, post_id: post.post_id, post_url: post.post_url, qualified: post.qualified,
-    semantic_tier: post.semantic_tier, semantic_score: post.semantic_score, unique_comments: rows.length,
-    replies: rows.filter(row => row.depth > 0).length, technical_duplicates: eventMerge.technical_duplicate_count,
-    orphan_reply_ids: orphanReplyIds, displayed_count: latest?.displayed_count ?? null,
+    semantic_tier: post.semantic_tier, semantic_score: post.semantic_score,
+    unique_comments: rows.filter(row => !row.ui_artifact).length, ui_artifacts: rows.filter(row => row.ui_artifact).length,
+    replies: rows.filter(row => !row.ui_artifact && row.depth > 0).length, technical_duplicates: eventMerge.technical_duplicate_count,
+    orphan_reply_ids: orphanReplyIds, incomplete_reply_lineage_ids: incompleteReplyLineageIds,
+    displayed_count: latest?.displayed_count ?? null,
     zero_comment_evidence: Boolean(latest?.zero_comment_evidence),
     remaining_controls: latest?.remaining_controls ?? null, stable_rounds: stableRounds, collected_at: core.now()};
   core.writeJson(path.join(evidence, "audit.json"), auditRecord);
@@ -404,8 +434,8 @@ function outputRows(checkpoint) {
   merged.rows.forEach(row => { if (pageStatus.has(row.post_id)) row.post_audit_status = pageStatus.get(row.post_id); });
   merged.technical_duplicate_count = eventMerge.technical_duplicate_count;
   return {merged, raw: merged.rows,
-    trusted: merged.rows.filter(row => row.post_audit_status === "PASS"),
-    partial: merged.rows.filter(row => row.post_audit_status === "PARTIAL")};
+    trusted: merged.rows.filter(row => row.post_audit_status === "PASS" && !row.ui_artifact),
+    partial: merged.rows.filter(row => row.post_audit_status === "PARTIAL" && !row.ui_artifact)};
 }
 
 function pythonExecutable() {
@@ -426,11 +456,12 @@ function writeOutputs(outDir, checkpoint, conversationMap, buildWorkbook = true)
   const manifest = {schema_version: "facebook_manifest_v2", collector_version: VERSION, generated_at: core.now(),
     asins: checkpoint.asins, stop_reason: checkpoint.stop_reason, raw_captured_count: (checkpoint.raw_capture_events || []).length,
     technical_duplicate_count: merged.technical_duplicate_count, final_collected_count: raw.length,
-    trusted_count: trusted.length, partial_count: partial.length,
+    ui_artifact_count: raw.filter(row => row.ui_artifact).length,
+    trusted_comment_count: trusted.length, trusted_count: trusted.length, partial_count: partial.length,
     blocked_post_count: checkpoint.page_map.filter(item => item.status === "BLOCKED").length,
     pass_post_count: checkpoint.page_map.filter(item => item.status === "PASS").length,
     partial_post_count: checkpoint.page_map.filter(item => item.status === "PARTIAL").length,
-    reply_count: raw.filter(row => row.depth > 0).length, post_count: checkpoint.page_map.length,
+    reply_count: raw.filter(row => !row.ui_artifact && row.depth > 0).length, post_count: checkpoint.page_map.length,
     checkpoint_resumed: Boolean(checkpoint.resumed_from)};
   core.writeJson(path.join(outDir, "manifest.json"), manifest);
   if (buildWorkbook) {
@@ -460,7 +491,7 @@ async function preflight(options, context, asins, owned) {
 }
 
 async function collect(options, context, asins, owned) {
-  const outDir = path.resolve(options.outDir || "outputs/facebook-comments");
+  const outDir = resolveOutputDir(options, asins);
   fs.mkdirSync(outDir, {recursive: true});
   const cpFile = checkpointPath(options, outDir);
   const checkpoint = loadCheckpoint(options, outDir, asins);
@@ -506,12 +537,14 @@ async function collect(options, context, asins, owned) {
       const roundQueries = checkpoint.queries.filter(query => query.discovery_round === round && query.status !== "done");
       if (!roundQueries.length) { checkpoint.stop_reason = "semantic_coverage_saturated"; break; }
       const roundStartRaw = rowsBefore.raw.length, roundStartEvents = checkpoint.raw_capture_events.length;
-      let roundBlocked = null, discoveredCount = 0, selectedCount = 0;
+      let roundBlocked = null, discoveredCount = 0, selectedCount = 0, highRelevanceCandidates = 0;
       for (const query of roundQueries) {
         const discovery = await discoverPosts(discoveryPage, query, options, conversationMap);
         query.status = discovery.status === "READY" ? "done" : "blocked";
         query.discovered_posts = discovery.posts.length;
         query.qualified_posts = discovery.posts.filter(post => post.qualified).length;
+        highRelevanceCandidates += query.qualified_posts;
+        query.executed_query = discovery.executed_query;
         query.completed_at = core.now();
         if (discovery.status === "BLOCKED") { query.blocked_reason = discovery.reason; roundBlocked = discovery.reason; saveCheckpoint(cpFile, checkpoint); break; }
         discoveredCount += discovery.posts.length;
@@ -541,7 +574,8 @@ async function collect(options, context, asins, owned) {
       conversationMap.layers.community_language = core.clean([...conversationMap.layers.community_language, ...terms]);
       checkpoint.conversation_map = conversationMap;
       checkpoint.round_history.push({discovery_round: round, queries: roundQueries.length, discovered_posts: discoveredCount,
-        selected_posts: selectedCount, new_comments: newComments, duplicate_rate: Number(duplicateRate.toFixed(4)),
+        selected_posts: selectedCount, high_relevance_candidates: highRelevanceCandidates,
+        new_comments: newComments, duplicate_rate: Number(duplicateRate.toFixed(4)),
         semantic_coverage_hash: core.hash(conversationMap.layers.community_language.slice().sort().join("|")).slice(0, 16), completed_at: core.now()});
       checkpoint.discovery_round = Math.max(checkpoint.discovery_round, round + 1);
       if (roundBlocked) { checkpoint.stop_reason = `access_restriction:${roundBlocked}`; break; }
@@ -558,7 +592,7 @@ async function main() {
   const asins = core.readAsins(options);
   const readiness = await ensureCdp(options);
   if (readiness.status !== "ready") {
-    const outDir = path.resolve(options.outDir || "outputs/facebook-comments");
+    const outDir = resolveOutputDir(options, asins);
     fs.mkdirSync(outDir, {recursive: true});
     const checkpoint = freshCheckpoint(asins); checkpoint.stop_reason = `cdp:${readiness.reason || readiness.status}`; checkpoint.out_dir = outDir;
     saveCheckpoint(path.join(outDir, "checkpoint.json"), checkpoint);
@@ -582,4 +616,5 @@ if (require.main === module) main().then(code => { process.exitCode = code; }).c
   console.error(JSON.stringify({status: "ERROR", error: error.stack || error.message}, null, 2)); process.exitCode = 1;
 });
 
-module.exports = {help, probeCdp, ensureCdp, amazonProduct, discoverPosts, collectPost, writeOutputs, preflight, collect};
+module.exports = {help, resolveOutputDir, probeCdp, ensureCdp, amazonProduct, discoverPosts, normalizeCaptured,
+  collectPost, outputRows, writeOutputs, preflight, collect};

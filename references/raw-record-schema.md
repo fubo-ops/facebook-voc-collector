@@ -6,9 +6,9 @@ Every delivered row represents a comment, never a standalone post.
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | `facebook_comment_v2` |
+| `schema_version` | `facebook_comment_v3` |
 | `platform` | `facebook` |
-| `source_specific_record_type` | `comment` |
+| `source_specific_record_type`, `record_kind` | `comment` or raw-evidence-only `ui_artifact` |
 | `asin`, `matched_asins` | ASIN lineage |
 | `matched_queries` | Discovery query lineage |
 | `post_id`, `post_url`, `post_title` | Stable post provenance |
@@ -18,7 +18,8 @@ Every delivered row represents a comment, never a standalone post.
 | `reply_comment_id` | Stable reply ID for reply rows; empty for top-level rows |
 | `parent_comment_id` | `post:POST_ID` for top level; direct parent comment ID for replies |
 | `depth` | `0` top level; direct lineage depth for replies |
-| `author`, `body`, `created_at`, `reaction_count`, `comment_url` | Visible source fields |
+| `author`, `raw_body`, `body_clean`, `body`, `created_at`, `reaction_count`, `comment_url` | Raw visible text, cleaned comment body, compatibility body, and source fields |
+| `ui_artifact`, `ui_artifact_reason` | Whole-record time/UI classification and reason |
 | `dedup_uncertain` | `true` only when no stable comment ID exists |
 | `post_audit_status` | `PASS`, `PARTIAL`, or `BLOCKED` |
 | `evidence_path`, `collected_at` | Audit path and collection time |
@@ -27,7 +28,7 @@ For links containing both parameters, `reply_comment_id` is the row's `comment_i
 
 ## Technical deduplication
 
-Only equal non-empty stable `comment_id` values merge. Merged rows union ASIN/query lineage. Text similarity, author similarity, and semantic labels never merge or remove rows. No-ID reads remain separate and receive a deterministic `record_id` plus `dedup_uncertain=true`.
+Only equal non-empty stable `comment_id` values merge for real comments. Merged rows union ASIN/query lineage. Text similarity, author similarity, and semantic labels never merge or remove real rows. No-ID real comments remain separate and receive a deterministic `record_id` plus `dedup_uncertain=true`. UI artifacts use a separate DOM-evidence key, have `dedup_uncertain=false`, and never masquerade as trustworthy no-ID comments.
 
 ## Query provenance
 
@@ -44,4 +45,4 @@ Each `query_plan.json` query contains `query_id`, `family`, `query`, `discovery_
 
 ## Workbook routing
 
-`Raw_Comments` contains all technically unique rows from qualified posts. PASS rows also appear in `Trusted_Comments`; PARTIAL rows also appear in `Partial_Candidates`; BLOCKED rows appear only in raw data if they were successfully read before the block. `Quality_Gate` verifies row counts, stable-ID uniqueness, subset routing, reply parents, and post audits.
+`Raw_Comments` contains all technically unique rows from qualified posts, including retained UI evidence. Only non-artifact PASS rows appear in `Trusted_Comments`; only non-artifact PARTIAL rows appear in `Partial_Candidates`; BLOCKED rows appear only in raw data if successfully read before the block. `Quality_Gate` verifies JSONL/CSV/manifest/page/evidence counts, stable-ID uniqueness, subset routing, reply parents, and that Trusted contains no pure-time/UI text.

@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const {extractVisible, expandVisible, sessionToken} = require('../extension/popup.js');
 const {extractVisible: extractAutomated} = require('../scripts/facebook_visible_capture.js');
+const {extractVisible: extractDebugCapture} = require('../extension/capture.js');
 
 class FakeNode {
   constructor(tag = 'div', attrs = {}, innerText = '') {
@@ -88,7 +89,7 @@ assert.equal(result.comments.find(item => item.comment_id === '1002').parent_com
 assert.equal(result.comments.find(item => item.comment_id === '1002').depth, 1);
 assert.equal(result.comments.find(item => item.comment_id === '1003').parent_comment_id, '');
 assert.equal(result.displayed_count, 6);
-assert.equal(expandVisible(), 1);
+assert.equal(expandVisible().length, 1);
 const automated = extractAutomated();
 assert.equal(automated.comments.find(item => item.comment_id === '1002').parent_comment_id, '1001');
 assert.equal(automated.comments.find(item => item.comment_id === '1002').depth, 1);
@@ -129,6 +130,28 @@ encodedRoot.append(new FakeNode('div', {role: 'article', 'aria-label': '评论�
   new FakeNode('a', {href: `https://www.facebook.com/profile?comment_id=${encodedId}`}, '1周')));
 installDocument(encodedRoot);
 assert.equal(extractAutomated().comments[0].comment_id, '4563578640527507');
+
+const mixedRoot = new FakeNode('main').append(new FakeNode('div', {'data-commentid': '4001'}).append(
+  new FakeNode('a', {role: 'link'}, 'E'),
+  new FakeNode('span', {dir: 'auto'}, 'This lick bowl helped\n38 weeks\nSee translation'),
+  new FakeNode('a', {href: 'https://www.facebook.com/example/posts/p1?comment_id=4001'}, '38 weeks'),
+  new FakeNode('button', {}, 'Reply')));
+installDocument(mixedRoot, 'https://www.facebook.com/example/posts/p1', '245条评论');
+const mixedCapture = extractAutomated();
+assert.equal(mixedCapture.displayed_count, 245);
+assert.equal(mixedCapture.comments[0].raw_body, 'This lick bowl helped\n38 weeks\nSee translation');
+assert.equal(mixedCapture.comments[0].body_clean, 'This lick bowl helped');
+assert.equal(mixedCapture.comments[0].ui_artifact, false);
+assert.equal(extractDebugCapture().comments[0].body_clean, 'This lick bowl helped');
+
+const timeOnlyRoot = new FakeNode('main').append(new FakeNode('div', {'data-commentid': '4002'}).append(
+  new FakeNode('a', {role: 'link'}, 'F'), new FakeNode('span', {dir: 'auto'}, '38周'),
+  new FakeNode('a', {href: 'https://www.facebook.com/example/posts/p1?comment_id=4002'}, '38周'),
+  new FakeNode('button', {}, 'Reply')));
+installDocument(timeOnlyRoot);
+const timeOnlyCapture = extractAutomated();
+assert.equal(timeOnlyCapture.comments[0].ui_artifact, true);
+assert.equal(timeOnlyCapture.comments[0].body_clean, '');
 
 installDocument(root, 'https://www.facebook.com/watch/?v=1480128156214957');
 assert.equal(extractVisible().post_id, '1480128156214957');

@@ -42,7 +42,7 @@ GitHub Actions 在 Windows、macOS、Linux 和 Python 3.10/3.13 上执行离线�
 
 ## 自动采集
 
-    node scripts\facebook_playwright_collector.cjs collect --asin ASIN --target-comments 300 --target-posts 30 --max-comments-per-post 100 --max-discovery-rounds 5 --session-mode cdp --headless 0
+    node scripts\facebook_playwright_collector.cjs collect --asin ASIN --target-comments 300 --target-posts 30 --max-comments-per-post 0 --max-discovery-rounds 5 --session-mode cdp --headless 0
 
 批量输入：
 
@@ -55,7 +55,7 @@ GitHub Actions 在 Windows、macOS、Linux 和 Python 3.10/3.13 上执行离线�
 
 ## 输出
 
-默认目录为 outputs/facebook-comments：
+默认目录为 `%FACEBOOK_COLLECTION_ROOT%\ASIN\`；本机已配置为 `C:\Users\Administrator\Desktop\Ecomtool工具[TOP]\Facebook评论采集\ASIN\`，未设置环境变量时使用当前目录下的 `Facebook评论采集\ASIN\`：
 
     raw_comments.jsonl
     trusted_comments.jsonl
@@ -66,7 +66,7 @@ GitHub Actions 在 Windows、macOS、Linux 和 Python 3.10/3.13 上执行离线�
     page_map.json
     manifest.json
     checkpoint.json
-    facebook_voc.xlsx
+    ASIN_Facebook评论.xlsx
     evidence/POST_ID/
 
 Excel 包含 Raw_Comments、Trusted_Comments、Partial_Candidates、Conversation_Map、Query_Performance、Post_Audit、Run_Summary 和 Quality_Gate。
@@ -77,6 +77,8 @@ Excel 包含 Raw_Comments、Trusted_Comments、Partial_Candidates、Conversation
 - PARTIAL：仍有展开控件、总数未知、超时或父子关系尚未完整验证。
 - BLOCKED：登录墙、验证码、403/429、访问限制或评论树无法加载。
 - 原始层保留合格帖子内所有成功读取的评论；只按稳定 comment_id 技术去重。
+- `raw_body` 保留原始可见文本，`body_clean` 仅保留评论正文。纯时间或 UI 标签记为 `ui_artifact=true`，只留在原始证据层，不进入 Trusted/VOC/社区词/后续查询。
+- `--max-comments-per-post 0` 为无上限；“245条评论”等高相关帖子不会在 100 条提前截断。
 
 ## 验证
 
