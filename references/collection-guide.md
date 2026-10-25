@@ -55,7 +55,7 @@ Collection stops with a checkpoint on `target_comments_reached`, `target_posts_r
 node --check scripts/facebook_playwright_collector.cjs
 node --test tests/test_facebook_core.cjs tests/test_popup.cjs
 python -m unittest discover -s tests -v
-python "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .
+python scripts/quick_validate.py .
 ```
 
 Use the Codex bundled Node/Python runtimes when system installations lack Playwright or openpyxl.

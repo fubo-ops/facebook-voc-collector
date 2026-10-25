@@ -1,101 +1,178 @@
-# Facebook VOC Collector
+# Facebook VOC 评论采集器
 
-一套可独立运行、也可作为 Codex Skill 使用的 Facebook VOC 评论采集器。输入一个或多个 Amazon ASIN 后，系统会解析商品语义、生成七类查询、发现公开 Facebook Page 帖子、视频和 Reels、展开可见评论与回复，并输出带审计和断点恢复能力的 JSONL、CSV 与 Excel。
+## 项目简介
 
-正式采集使用专用 Chrome Profile + CDP，不依赖浏览器扩展。extension 目录仅保留为可见 DOM 调试工具。
+`facebook-voc-collector` 是由 Amazon ASIN 驱动的 Facebook 公开评论采集工具，也可作为 Codex Skill 使用。程序从商品和可见卖家精灵数据建立产品语境，生成查询，发现公开 Page 帖子、视频和 Reels，再读取可见评论与回复，输出原始数据、审核记录和 Excel。
 
-## 支持环境
+正式入口是 `scripts/facebook_playwright_collector.cjs`，通过 Playwright 连接专用 Chrome Profile 的 CDP 会话。`extension/` 和 Python 本地接收桥保留为可见 DOM 调试工具，不是正式自动采集的必需步骤。
 
-- Windows 10/11
-- Python 3.10–3.13
-- Node.js 20+
-- Google Chrome
-- 公开可见的 Facebook 内容
+## 核心功能
 
-GitHub Actions 在 Windows、macOS、Linux 和 Python 3.10/3.13 上执行离线数据契约、评论树、工作簿与 JavaScript 测试。自动启动专用 CDP Chrome 的脚本为 Windows PowerShell 实现。
+- 支持单 ASIN、逗号分隔 ASIN 组和 ASIN 文件，合并去重后按当前产品证据生成七类查询。
+- 首轮使用 Amazon 与可见卖家精灵证据；后续发现轮次从已取得的帖子和真实评论中扩展语言，并保留查询来源。
+- 对候选帖子做产品相关性判断，进入合格帖子后选择可见的全部评论排序、展开评论和回复，并逐次保存断点。
+- 保留原始可见文本与清洗正文，单独标记纯时间/UI 记录；真实评论仅按稳定评论 ID 技术去重，没有稳定 ID 的评论保留并标记不确定性。
+- 保存评论树、直接父评论、回复深度、剩余展开控件和动作记录，以 PASS/PARTIAL/BLOCKED 区分完整性。
+- 将非 UI 的 PASS 评论写入 Trusted，将非 UI 的 PARTIAL 评论写入候选层；已读原始记录仍保留在 Raw。
+- 生成 JSONL、CSV、查询与页面映射、manifest、checkpoint、逐帖证据以及八表 Excel，支持断点续跑和不完整帖子重审。
 
-## 仓库结构
+| 工作表 | 内容 |
+| --- | --- |
+| Raw_Comments | 原始已读记录及保留的 UI 证据 |
+| Trusted_Comments | 非 UI 的 PASS 评论 |
+| Partial_Candidates | 非 UI 的 PARTIAL 评论 |
+| Conversation_Map | 商品与社区语言语境 |
+| Query_Performance | 查询来源、执行及发现情况 |
+| Post_Audit | 帖子完整性与评论树审核 |
+| Run_Summary | 采集、重复、回复及可信评论数量 |
+| Quality_Gate | 数量、父子关系、子集分流与 UI 污染检查 |
 
-    .github/workflows/  GitHub Actions
-    agents/             Codex Skill 界面元数据
-    extension/          可选调试扩展
-    references/         采集流程与字段说明
-    scripts/            CLI、评论树、导出和 CDP 启动脚本
-    tests/              Python 与 Node 回归测试
-    SKILL.md             Codex Skill 入口
+## 技术栈
 
-## 安装
+| 用途 | 技术与仓库约束 |
+| --- | --- |
+| 自动采集与评论树 | Node.js 20+，Playwright `>=1.55.0 <2` |
+| 浏览器会话 | Google Chrome、CDP，默认本机端口 `9222` |
+| 工作簿与调试桥 | Python 3.10–3.13，openpyxl `>=3.1,<4`；`.python-version` 为 `3.12.13` |
+| 专用 Chrome 启动 | Windows PowerShell 脚本 |
+| 可选调试界面 | Chrome 扩展、HTML 与 JavaScript |
+| 测试 | unittest、Node test runner、GitHub Actions |
 
-    git clone https://github.com/fubo-ops/facebook-voc-collector.git
-    cd facebook-voc-collector
-    python -m venv .venv
-    .venv\Scripts\Activate.ps1
-    python -m pip install -r requirements.txt
-    npm ci
+正式自动启动流程以 Windows 为主。CI 在 Windows、macOS 和 Ubuntu 上运行离线测试，不能据此推断所有平台的在线浏览器流程均已验收。
 
-## 首次登录与 Preflight
+## 快速开始
 
-    .\scripts\start_facebook_cdp.ps1
-    node scripts\facebook_playwright_collector.cjs preflight --asin ASIN --session-mode cdp --headless 0
+### 安装
 
-首次 Facebook 登录属于环境准备。正常采集不会要求点击扩展、手动展开评论或逐帖操作。
+以下命令从 Windows PowerShell 执行：
 
-## 自动采集
+```powershell
+git clone https://github.com/fubo-ops/facebook-voc-collector.git
+cd facebook-voc-collector
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+npm ci
+```
 
-    node scripts\facebook_playwright_collector.cjs collect --asin ASIN --target-comments 300 --target-posts 30 --max-comments-per-post 0 --max-discovery-rounds 5 --session-mode cdp --headless 0
+需要 Node.js 20+、Python 3.10–3.13 和 Google Chrome。macOS/Linux 可激活 `.venv/bin/activate` 运行离线测试；仓库中的自动 CDP 启动器调用 `powershell.exe`，不提供对应平台的自动启动实现。
 
-批量输入：
+### 环境准备与预检
 
-    node scripts\facebook_playwright_collector.cjs collect --asins ASIN_A,ASIN_B --session-mode cdp
-    node scripts\facebook_playwright_collector.cjs collect --asin-file .\asins.csv --session-mode cdp
+```powershell
+.\scripts\start_facebook_cdp.ps1
+node scripts/facebook_playwright_collector.cjs preflight --asin ASIN --session-mode cdp --headless 0
+```
 
-从断点继续并重试不完整帖子：
+将 `ASIN` 替换为实际 10 位商品标识。启动器使用专用浏览器资料目录；首次登录由使用者在浏览器内完成。预检和采集只读取当前会话可见的内容，不自动处理登录或验证码。
 
-    node scripts\facebook_playwright_collector.cjs collect --asin ASIN --resume outputs\facebook-comments\checkpoint.json --retry-partial --force-reaudit-partial --session-mode cdp
+### 采集、批量与续跑
 
-## 输出
+```powershell
+node scripts/facebook_playwright_collector.cjs collect --asin ASIN --target-comments 300 --target-posts 30 --max-comments-per-post 0 --max-discovery-rounds 5 --session-mode cdp --headless 0
+node scripts/facebook_playwright_collector.cjs collect --asins ASIN_A,ASIN_B --session-mode cdp
+node scripts/facebook_playwright_collector.cjs collect --asin-file asins.csv --session-mode cdp
+```
 
-默认目录为 `%FACEBOOK_COLLECTION_ROOT%\ASIN\`；本机已配置为 `C:\Users\Administrator\Desktop\Ecomtool工具[TOP]\Facebook评论采集\ASIN\`，未设置环境变量时使用当前目录下的 `Facebook评论采集\ASIN\`：
+`--max-comments-per-post 0` 不设置单帖条数上限，但动作、超时和访问限制仍可能使帖子标为 PARTIAL。使用已有输出目录中的实际断点路径恢复：
 
-    raw_comments.jsonl
-    trusted_comments.jsonl
-    partial_candidates.jsonl
-    raw_comments.csv
-    conversation_map.json
-    query_plan.json
-    page_map.json
-    manifest.json
-    checkpoint.json
-    ASIN_Facebook评论.xlsx
-    evidence/POST_ID/
+```powershell
+node scripts/facebook_playwright_collector.cjs collect --asin ASIN --resume "Facebook评论采集/ASIN/checkpoint.json" --retry-partial --force-reaudit-partial --session-mode cdp
+```
 
-Excel 包含 Raw_Comments、Trusted_Comments、Partial_Candidates、Conversation_Map、Query_Performance、Post_Audit、Run_Summary 和 Quality_Gate。
+默认输出根目录来自 `FACEBOOK_COLLECTION_ROOT` 环境变量；未设置时使用当前目录的 `Facebook评论采集/`，子目录由输入 ASIN 拼接。可用 `--out-dir outputs/run-001` 指定目录。
 
-## 状态与完整性
+输出包括 `raw_comments.jsonl`、`trusted_comments.jsonl`、`partial_candidates.jsonl`、`raw_comments.csv`、`conversation_map.json`、`query_plan.json`、`page_map.json`、`manifest.json`、`checkpoint.json`、`{ASIN}_Facebook评论.xlsx` 和 `evidence/`。评论、店铺资料、浏览器 Profile、断点与生成文件均不提交到 Git。
 
-- PASS：展开 frontier 已关闭、连续两轮稳定、总数已知或明确为零、没有孤儿回复。
-- PARTIAL：仍有展开控件、总数未知、超时或父子关系尚未完整验证。
-- BLOCKED：登录墙、验证码、403/429、访问限制或评论树无法加载。
-- 原始层保留合格帖子内所有成功读取的评论；只按稳定 comment_id 技术去重。
-- `raw_body` 保留原始可见文本，`body_clean` 仅保留评论正文。纯时间或 UI 标签记为 `ui_artifact=true`，只留在原始证据层，不进入 Trusted/VOC/社区词/后续查询。
-- `--max-comments-per-post 0` 为无上限；“245条评论”等高相关帖子不会在 100 条提前截断。
+## 项目结构
 
-## 验证
+以下完整结构对应 `git ls-files`，不含运行产物：
 
-    python -m unittest discover -s tests -p "test_*.py" -v
-    npm test
-    npm run check
-    python scripts\quick_validate.py .
+```text
+facebook-voc-collector/
+├── .github/
+│   └── workflows/
+│       └── test.yml
+├── .gitignore
+├── .python-version
+├── LICENSE
+├── README.md
+├── SKILL.md
+├── agents/
+│   └── openai.yaml
+├── extension/
+│   ├── capture.js
+│   ├── manifest.json
+│   ├── popup.html
+│   └── popup.js
+├── package-lock.json
+├── package.json
+├── pyproject.toml
+├── references/
+│   ├── collection-guide.md
+│   └── raw-record-schema.md
+├── requirements.txt
+├── scripts/
+│   ├── __init__.py
+│   ├── build_facebook_workbook.py
+│   ├── collector.py
+│   ├── facebook_playwright_collector.cjs
+│   ├── facebook_visible_capture.js
+│   ├── facebook_voc_core.cjs
+│   ├── quick_validate.py
+│   └── start_facebook_cdp.ps1
+└── tests/
+    ├── test_collector.py
+    ├── test_facebook_core.cjs
+    ├── test_popup.cjs
+    ├── test_repository_distribution.py
+    └── test_workbook.py
+```
 
-## 数据与访问边界
+根目录没有需要迁入 `docs/` 的过程文档，也没有已跟踪的运行产物；Skill 入口、资源和 references 保留原路径。
 
-- .gitignore 排除输出目录、浏览器 Profile、断点、Excel、JSONL、日志和缓存。
-- 仓库不保存 Cookie、密码、令牌、浏览器凭据或采集结果。
-- 不自动处理登录、验证码、私有内容、年龄和地区限制或访问风控。
-- 遇到明确访问限制时保存本地 checkpoint 并标记 PARTIAL 或 BLOCKED。
+## 架构图
 
-详细流程见 references/collection-guide.md，字段契约见 references/raw-record-schema.md。
+```mermaid
+flowchart TD
+    A[ASIN 输入] --> B[CLI 与 CDP 预检]
+    C[专用 Chrome 会话] --> B
+    B --> D[Amazon 与可见卖家精灵数据]
+    D --> E[facebook_voc_core.cjs 产品语境与查询]
+    E --> F[Facebook 公开帖子发现与相关性判断]
+    F --> G[Playwright 展开评论与可见 DOM 读取]
+    G --> H[评论树、完整性与技术去重]
+    H --> I[Raw、Trusted、Partial 与逐帖证据]
+    I --> J[build_facebook_workbook.py]
+    J --> K[八表 Excel]
+    G <--> L[checkpoint 断点]
+    M[可选扩展调试] --> N[collector.py 本地接收桥]
+```
 
-## License
+## 当前状态与开发计划
 
-MIT，见 LICENSE。
+已有自动查询、公开帖子发现、评论树展开、UI 记录区分、完整性分流、断点重审和八表导出实现。离线测试覆盖评论去重、父子关系、查询、弹窗调试、工作簿与分发契约，CI 配置了三个操作系统与 Python 3.10/3.13。
+
+已准备依赖的环境可运行：
+
+```bash
+python -B -m unittest discover -s tests -p "test_*.py" -v
+npm test
+npm run check
+python -B scripts/quick_validate.py .
+```
+
+`package.json` 和正式 Node CLI 标为 `2.1.0`，`pyproject.toml` 仍为 `1.0.0`，版本元数据待统一。在线效果受 Facebook 页面、登录和访问限制影响；PASS 仅表示当前可见评论树满足仓库完整性规则，不代表平台全部评论。当前真实业务环境验收记录与后续开发计划待补充。
+
+## 文档
+
+- [Skill 入口](SKILL.md)
+- [采集、发现、续跑与停止规则](references/collection-guide.md)
+- [评论字段、父子关系与审核契约](references/raw-record-schema.md)
+- [Windows CDP 启动器](scripts/start_facebook_cdp.ps1)
+- [工作簿构建入口](scripts/build_facebook_workbook.py)
+- [CI 配置](.github/workflows/test.yml)
+
+## 许可证
+
+采用 [MIT License](LICENSE)。
