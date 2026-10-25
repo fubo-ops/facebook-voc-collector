@@ -11,7 +11,7 @@
 
 `facebook-voc-collector` 是由 Amazon ASIN 驱动的 Facebook 公开评论采集工具，也可作为 Codex Skill 使用。程序从商品和可见卖家精灵数据建立产品语境，生成七类查询，发现公开 Page 帖子、视频和 Reels，再读取可见评论与回复，输出原始数据、审核记录和 Excel。
 
-正式入口是 `scripts/facebook_playwright_collector.cjs`，通过 Playwright 连接专用 Chrome Profile 的 CDP 会话；`extension/` 与 Python 本地接收桥只是可见 DOM 调试工具。仓库不含 Meta API 调用，也不处理登录或验证码，只读取当前会话可见的内容。
+正式入口是 `scripts/facebook_playwright_collector.cjs`，通过 Playwright 连接专用 Chrome Profile 的 CDP（Chrome 调试协议）会话；`extension/` 与 Python 本地接收桥只是可见 DOM（页面结构）调试工具。仓库不含 Meta API 调用，也不处理登录或验证码，只读取当前会话可见的内容。
 
 ## 核心功能
 
@@ -164,13 +164,13 @@ facebook-voc-collector/
 
 - ✅ 可见的全部评论排序、评论与回复展开
 - ✅ UI 记录区分、稳定 ID 技术去重与不确定标记
-- ✅ PASS / PARTIAL / BLOCKED 完整性与逐帖证据
+- ✅ PASS（通过）/ PARTIAL（部分）/ BLOCKED（受阻）完整性分级与逐帖证据
 
 ### Phase 3: 输出与续跑
 
 - ✅ 八表 Excel、JSONL / CSV 与查询页面映射导出
 - ✅ checkpoint 断点续跑与不完整帖子重审
-- ✅ Trusted 与 Partial 分层写入及 Quality Gate 检查
+- ✅ Trusted（可信层）与 Partial（候选层）分层写入及 Quality Gate（质量门禁）检查
 
 ### Phase 4: 工程化与上线
 
@@ -179,7 +179,7 @@ facebook-voc-collector/
 - ✅ `quick_validate.py` 分发契约校验
 - ⬜ `package.json` 与 `pyproject.toml` 版本元数据统一
 - ⬜ 真实业务环境验收记录与后续排期
-- ⬜ 非 Windows 平台的自动 CDP 启动
+- ⬜ 非 Windows 平台的自动 CDP（Chrome 调试协议）启动
 
 ## 文档
 
